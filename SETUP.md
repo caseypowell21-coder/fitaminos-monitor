@@ -43,7 +43,7 @@ Add each of these:
 | `GHL_API_KEY` | Your GoHighLevel API key (see Part 2) | Required |
 | `GHL_LOCATION_ID` | Your GHL Location ID | Required |
 | `ALERT_PHONE` | Phone to text — E.164 format, e.g. `+15555551234` | Required |
-| `ALERT_EMAIL` | Fallback email if SMS fails | Recommended |
+| `ALERT_EMAIL` | Fallback email — fires **only** when SMS fails (never both at once); subject is prefixed with `[SMS DELIVERY FAILED]` so the cause is obvious | Recommended |
 | `SMTP_HOST` | e.g. `smtp.gmail.com` | If using email fallback |
 | `SMTP_PORT` | `587` (STARTTLS) or `465` (SSL) | If using email fallback |
 | `SMTP_USER` | SMTP username | If using email fallback |
