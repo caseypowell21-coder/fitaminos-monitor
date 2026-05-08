@@ -1,9 +1,12 @@
 """
-alerts.py v1.0.0
+alerts.py v1.1.0
 Alerting module for fitaminos checkout monitor.
 
+v1.1.0: Email is SMS-fallback only (was: both fired on every alert)
+
 Primary path: GoHighLevel Conversations API (SMS).
-Fallback path: SMTP email.
+Fallback path: SMTP email — only fires when the SMS send fails (GHL down,
+rate-limited, network error, etc.). A successful SMS suppresses email.
 Optional: ALERT_QUIET_HOURS gate, e.g. "22:00-06:00" — suppresses SMS during
 that window but still sends email so you can review in the morning.
 
@@ -137,7 +140,11 @@ def _ghl_send_sms(
         "locationId": location_id,
     }
     resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=HTTP_TIMEOUT)
-    if resp.status_code in (200, 201, 202):
+    # Treat any 2xx as success — GHL has been observed returning 200/201/202
+    # depending on routing/queueing, and a future-proof check is safer than
+    # an explicit allowlist (a missed 2xx caused duplicate email-fallback firing
+    # in v1.0.0). 4xx and 5xx fall through to email fallback.
+    if 200 <= resp.status_code < 300:
         return True
     print(f"(alerts) GHL send SMS HTTP {resp.status_code}: {resp.text[:300]}")
     return False
@@ -176,11 +183,15 @@ def send_via_ghl(message: str) -> bool:
 # SMTP fallback
 # ---------------------------------------------------------------------------
 
-def send_via_email(message: str) -> bool:
+def send_via_email(message: str, sms_failed: bool = False) -> bool:
     """
     Email fallback. Configure with:
       SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS,
       SMTP_FROM, ALERT_EMAIL, optional SMTP_USE_SSL=1 for port-465 SSL.
+
+    When `sms_failed=True`, the subject and body are prefixed with
+    "[SMS DELIVERY FAILED]" so the recipient knows why email is firing
+    instead of (or in addition to) the usual SMS.
     """
     host = os.environ.get("SMTP_HOST", "").strip()
     user = os.environ.get("SMTP_USER", "").strip()
@@ -194,11 +205,22 @@ def send_via_email(message: str) -> bool:
         print("(alerts) SMTP env vars missing — skipping email path")
         return False
 
+    if sms_failed:
+        subject = "[SMS DELIVERY FAILED] fitaminos.com checkout monitor — ALERT"
+        body = (
+            "[SMS DELIVERY FAILED] — primary SMS via GoHighLevel did not deliver, "
+            "so this email is firing as fallback.\n\n"
+            f"{message}"
+        )
+    else:
+        subject = "fitaminos.com checkout monitor — ALERT"
+        body = message
+
     msg = EmailMessage()
-    msg["Subject"] = "fitaminos.com checkout monitor — ALERT"
+    msg["Subject"] = subject
     msg["From"] = sender or user
     msg["To"] = recipient
-    msg.set_content(message)
+    msg.set_content(body)
 
     try:
         if use_ssl:
@@ -224,9 +246,18 @@ def send_via_email(message: str) -> bool:
 
 def send_alert(message: str) -> bool:
     """
-    Try SMS via GHL first; if it fails or quiet hours, fall back to email.
-    Returns True if at least one channel delivered.
-    During quiet hours: skip SMS, send email only.
+    SMS-first, email-as-fallback alerting.
+
+    - Normal hours: SMS via GHL is attempted first. If it succeeds, email is
+      NOT sent (this is the v1.1.0 fix — previously a non-200/201/202 success
+      code from GHL caused both channels to fire). Email is only sent when SMS
+      fails (HTTP 4xx/5xx, connection error, missing creds, or unhandled exc).
+    - Quiet hours: SMS is suppressed entirely and email is sent directly,
+      regardless of SMS success/failure (existing intent — preserved).
+
+    Returns True iff at least one channel delivered. Caller (or the CLI below)
+    can use the return value to exit non-zero so a CI step fails visibly when
+    NO channel reached the operator.
     """
     quiet_spec = os.environ.get("ALERT_QUIET_HOURS", "").strip()
     quiet = _parse_quiet_hours(quiet_spec) if quiet_spec else None
@@ -234,15 +265,31 @@ def send_alert(message: str) -> bool:
 
     if in_quiet:
         print(f"(alerts) inside quiet hours {quiet_spec} — emailing instead of SMS")
-        emailed = send_via_email(message)
+        emailed = send_via_email(message, sms_failed=False)
+        if not emailed:
+            print("(alerts) quiet-hours email FAILED — alert not delivered")
         return emailed
 
-    sms_ok = send_via_ghl(message)
+    # Normal hours: SMS first, email only if SMS fails.
+    sms_ok = False
+    try:
+        sms_ok = send_via_ghl(message)
+    except Exception as exc:  # noqa: BLE001 — any unhandled SMS failure → fallback
+        print(f"(alerts) SMS path raised unexpectedly: {type(exc).__name__}: {exc}")
+        sms_ok = False
+
     if sms_ok:
+        print("(alerts) SMS sent successfully — skipping email")
         return True
 
     print("(alerts) SMS failed — attempting email fallback")
-    return send_via_email(message)
+    emailed = send_via_email(message, sms_failed=True)
+    if emailed:
+        print("(alerts) email fallback succeeded")
+        return True
+
+    print("(alerts) BOTH SMS AND EMAIL FAILED — alert not delivered")
+    return False
 
 
 # ---------------------------------------------------------------------------
