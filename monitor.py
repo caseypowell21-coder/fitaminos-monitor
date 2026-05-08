@@ -195,11 +195,16 @@ def step_add_to_cart(page: Page) -> tuple[str, str]:
         _assert(response is not None and 200 <= response.status < 400,
                 f"product page status {response.status if response else 'none'}")
 
+    # Exclude the Fitaminos theme's `floating_add_to_cart_button` — that
+    # variant lives in the DOM ahead of the in-product button but is
+    # display:none until the page scrolls past the price block, so .first
+    # picks an invisible element and Playwright's click loops on the
+    # visibility check.
     add_btn = page.locator(
-        "button.single_add_to_cart_button, "
-        "form.cart button[type=submit], "
-        "button[name='add-to-cart'], "
-        "a.add_to_cart_button"
+        "button.single_add_to_cart_button:not(.floating_add_to_cart_button), "
+        "form.cart button[type=submit]:not(.floating_add_to_cart_button), "
+        "button[name='add-to-cart']:not(.floating_add_to_cart_button), "
+        "a.add_to_cart_button:not(.floating_add_to_cart_button)"
     ).first
     _assert(add_btn.count() > 0, "Add to cart button not found on product page")
     add_btn.click(timeout=DEFAULT_TIMEOUT_MS)
