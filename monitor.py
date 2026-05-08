@@ -1,5 +1,5 @@
 """
-monitor.py v1.0.0
+monitor.py v1.0.1
 Synthetic checkout monitor for fitaminos.com.
 
 Runs a sequenced set of checks against the live site simulating a real
@@ -9,6 +9,13 @@ URL, and DOM excerpt, fire an SMS alert via GoHighLevel, write a
 failure report, and exit non-zero so GitHub Actions marks the run red.
 
 Designed for Python 3.11+ with Playwright (sync API).
+
+v1.0.1 - Added EMAV age-gate dismissal. The site uses the "Easy Modal Age
+Verification" plugin which renders an interstitial #emav-overlay-wrap
+that blocks clicks on the homepage / shop until accepted. We pre-seed
+the `emav-age-verified=1` cookie on the browser context (primary
+defense) AND call dismiss_age_gate() after every navigation as
+belt-and-suspenders in case the cookie name/domain ever changes.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ from alerts import send_alert
 # Config
 # ---------------------------------------------------------------------------
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 BASE_URL = "https://fitaminos.com"
 
 # A known, stable product URL. If/when this product is retired, swap it
@@ -108,7 +115,7 @@ def _run_step(
         report.steps.append(result)
         print(f"PASS  {name}  ({elapsed_ms}ms)  {url}")
         return True
-    except Exception as exc:  # noqa: BLE001 — we want any failure
+    except Exception as exc:  # noqa: BLE001 - we want any failure
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         detail = f"{type(exc).__name__}: {exc}"
         url = ""
@@ -128,12 +135,50 @@ def _assert(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def dismiss_age_gate(page: Page) -> None:
+    """Dismiss the EMAV (Easy Modal Age Verification) overlay if present.
+
+    The site renders an interstitial `<div id="emav-overlay-wrap">` with a
+    confirm button `<input id="emav_confirm_age" type="button">` (and a
+    decline button `#emav_not_confirm_age` we must NOT click). The wrapper
+    is always in the DOM but `display:none` once verified - so we only act
+    if it is actually visible. Idempotent: safe to call after every goto.
+    """
+    try:
+        wrap = page.locator("#emav-overlay-wrap")
+        if wrap.count() == 0:
+            return
+        try:
+            visible = wrap.first.is_visible()
+        except Exception:
+            visible = False
+        if not visible:
+            return
+
+        accept = page.locator("#emav_confirm_age").first
+        if accept.count() == 0:
+            print("(emav: overlay visible but #emav_confirm_age missing)")
+            return
+        accept.click(timeout=5_000)
+        try:
+            wrap.first.wait_for(state="hidden", timeout=5_000)
+        except PlaywrightTimeoutError:
+            if page.locator("#emav-overlay-wrap").count() == 0:
+                pass
+            else:
+                print("(emav: overlay still visible 5s after click)")
+        print("emav: age gate dismissed")
+    except Exception as exc:  # noqa: BLE001
+        print(f"(emav dismissal non-fatal error: {type(exc).__name__}: {exc})")
+
+
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
 
 def step_homepage(page: Page) -> tuple[str, str]:
     response = page.goto(BASE_URL, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+    dismiss_age_gate(page)
     _assert(response is not None, "no response object")
     status = response.status if response else 0
     _assert(200 <= status < 400, f"unexpected HTTP status {status}")
@@ -145,6 +190,7 @@ def step_homepage(page: Page) -> tuple[str, str]:
 
 def step_shop(page: Page) -> tuple[str, str]:
     response = page.goto(f"{BASE_URL}/shop/", timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+    dismiss_age_gate(page)
     _assert(response is not None, "no response object")
     status = response.status if response else 0
     _assert(200 <= status < 400, f"unexpected HTTP status {status}")
@@ -164,7 +210,7 @@ def step_shop(page: Page) -> tuple[str, str]:
                 break
         except Exception:
             continue
-    _assert(found > 0, "no product elements on /shop/ — selectors all empty")
+    _assert(found > 0, "no product elements on /shop/ - selectors all empty")
     return f"status={status}, products visible={found}", page.url
 
 
@@ -176,12 +222,13 @@ def step_add_to_cart(page: Page) -> tuple[str, str]:
     if PRODUCT_URL.rstrip("/").endswith("/shop"):
         # Already on shop or going to it. Pick the first product and
         # navigate directly to its href rather than .click()ing the
-        # wrapping <a> — in the Fitaminos theme (and several other WC
+        # wrapping <a> - in the Fitaminos theme (and several other WC
         # themes) the LoopProduct-link is a zero-area wrapper around an
         # absolutely-positioned image, so Playwright's "visible, enabled
         # and stable" check loops forever. goto() bypasses that and is
         # equivalent from the customer's perspective.
         page.goto(f"{BASE_URL}/shop/", timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+        dismiss_age_gate(page)
         first_link = page.locator("ul.products li.product a.woocommerce-LoopProduct-link, "
                                   ".products .product a.woocommerce-LoopProduct-link, "
                                   ".products .product a[href*='/product/']").first
@@ -190,12 +237,14 @@ def step_add_to_cart(page: Page) -> tuple[str, str]:
         _assert(bool(href) and "/product/" in href,
                 f"first product link missing /product/ href: {href!r}")
         page.goto(href, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+        dismiss_age_gate(page)
     else:
         response = page.goto(PRODUCT_URL, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+        dismiss_age_gate(page)
         _assert(response is not None and 200 <= response.status < 400,
                 f"product page status {response.status if response else 'none'}")
 
-    # Exclude the Fitaminos theme's `floating_add_to_cart_button` — that
+    # Exclude the Fitaminos theme's `floating_add_to_cart_button` - that
     # variant lives in the DOM ahead of the in-product button but is
     # display:none until the page scrolls past the price block, so .first
     # picks an invisible element and Playwright's click loops on the
@@ -219,6 +268,7 @@ def step_add_to_cart(page: Page) -> tuple[str, str]:
     except PlaywrightTimeoutError:
         # Fall back: re-check cart contents directly
         page.goto(f"{BASE_URL}/cart/", timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+        dismiss_age_gate(page)
         _assert(page.locator(".woocommerce-cart-form, .wc-block-cart").count() > 0,
                 "cart confirmation never appeared and /cart/ has no cart form")
 
@@ -227,6 +277,7 @@ def step_add_to_cart(page: Page) -> tuple[str, str]:
 
 def step_cart_renders(page: Page) -> tuple[str, str]:
     response = page.goto(f"{BASE_URL}/cart/", timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+    dismiss_age_gate(page)
     _assert(response is not None and 200 <= response.status < 400,
             f"/cart/ status {response.status if response else 'none'}")
 
@@ -236,7 +287,7 @@ def step_cart_renders(page: Page) -> tuple[str, str]:
         ".wc-block-cart-items__row, "
         ".cart_item"
     ).count() > 0
-    _assert(has_item, "cart appears empty — no cart_item rows")
+    _assert(has_item, "cart appears empty - no cart_item rows")
 
     # Total visible
     has_total = page.locator(
@@ -263,8 +314,10 @@ def step_checkout_renders(page: Page) -> tuple[str, str]:
     else:
         # Fallback: navigate directly
         page.goto(f"{BASE_URL}/checkout/", timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle")
 
-    _assert("/checkout" in page.url, f"did not land on /checkout/ — at {page.url}")
+    dismiss_age_gate(page)
+    _assert("/checkout" in page.url, f"did not land on /checkout/ - at {page.url}")
 
     # Billing fields present (classic checkout) OR block checkout container
     has_billing = (
@@ -298,6 +351,25 @@ def run_checks() -> RunReport:
         )
         context.set_default_timeout(DEFAULT_TIMEOUT_MS)
         context.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+
+        # Pre-seed the EMAV age-verification cookie so the overlay never
+        # appears in the first place. Confirmed by manual inspection on
+        # 2026-05-08: clicking "I am 21 or older" sets exactly this
+        # cookie. The dismiss_age_gate helper provides a backup in case
+        # the cookie name ever changes.
+        try:
+            context.add_cookies([
+                {
+                    "name": "emav-age-verified",
+                    "value": "1",
+                    "domain": "fitaminos.com",
+                    "path": "/",
+                },
+            ])
+            print("emav: pre-seeded emav-age-verified=1 cookie")
+        except Exception as exc:  # noqa: BLE001
+            print(f"(emav cookie pre-seed failed, will rely on click dismissal: {exc})")
+
         page = context.new_page()
 
         steps: list[tuple[str, Callable[[], tuple[str, str]]]] = [
@@ -343,7 +415,7 @@ def write_failure_report(report: RunReport) -> Path:
     path = ARTIFACT_DIR / "failure-report.md"
     failed = report.failed_step
     lines = [
-        "# fitaminos.com checkout monitor — FAILURE",
+        "# fitaminos.com checkout monitor - FAILURE",
         "",
         f"- Monitor version: `{VERSION}`",
         f"- Started:  `{report.started_at}`",
@@ -358,7 +430,7 @@ def write_failure_report(report: RunReport) -> Path:
         "| --- | --- | --- | --- |",
     ]
     for s in report.steps:
-        status = "✅ pass" if s.ok else "❌ FAIL"
+        status = "PASS" if s.ok else "FAIL"
         lines.append(f"| {s.name} | {status} | {s.duration_ms} | {s.detail} |")
 
     if report.dom_excerpt:
@@ -393,15 +465,15 @@ def write_run_summary(report: RunReport) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    print(f"fitaminos checkout monitor v{VERSION} — starting at {now_iso()}")
+    print(f"fitaminos checkout monitor v{VERSION} - starting at {now_iso()}")
     try:
         report = run_checks()
     except Exception as exc:  # catastrophic: Playwright failed to start
-        print(f"FATAL — monitor itself crashed: {exc}")
+        print(f"FATAL - monitor itself crashed: {exc}")
         traceback.print_exc()
         try:
             send_alert(
-                f"fitaminos.com monitor CRASHED at startup — {type(exc).__name__}: {exc}"
+                f"fitaminos.com monitor CRASHED at startup - {type(exc).__name__}: {exc}"
             )
         except Exception as alert_exc:
             print(f"(alert also failed: {alert_exc})")
@@ -410,7 +482,7 @@ def main() -> int:
     write_run_summary(report)
 
     if report.ok:
-        print(f"ALL CHECKS PASSED — finished {report.finished_at}")
+        print(f"ALL CHECKS PASSED - finished {report.finished_at}")
         return 0
 
     # Failure path
@@ -420,7 +492,7 @@ def main() -> int:
 
     msg = (
         f"fitaminos.com checkout monitor FAIL at step "
-        f"[{failed.name}] — {failed.url or 'unknown URL'} at {report.finished_at}"
+        f"[{failed.name}] - {failed.url or 'unknown URL'} at {report.finished_at}"
     )
     try:
         send_alert(msg)
