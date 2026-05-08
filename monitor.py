@@ -1,4 +1,4 @@
-TEST_REPLACEMENT_ONLY"""
+"""
 monitor.py v1.0.0
 Synthetic checkout monitor for fitaminos.com.
 
