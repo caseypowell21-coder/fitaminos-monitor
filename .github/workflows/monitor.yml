@@ -1,0 +1,85 @@
+name: Fitaminos Checkout Monitor
+
+on:
+  schedule:
+    # GitHub cron is UTC. Every 15 minutes.
+    # Note: GitHub may delay scheduled runs during heavy load.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:  # allow manual runs from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  # Don't pile up runs on top of each other if one is slow.
+  group: fitaminos-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: Run synthetic checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium --with-deps
+
+      - name: Run monitor
+        env:
+          # GoHighLevel credentials
+          GHL_API_KEY: ${{ secrets.GHL_API_KEY }}
+          GHL_LOCATION_ID: ${{ secrets.GHL_LOCATION_ID }}
+          ALERT_PHONE: ${{ secrets.ALERT_PHONE }}
+
+          # Email fallback (optional but recommended)
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+
+          # Optional quiet hours, e.g. "22:00-06:00" (server-local time)
+          ALERT_QUIET_HOURS: ${{ vars.ALERT_QUIET_HOURS }}
+
+          # Optional override of which product page to use for the cart test
+          PRODUCT_URL: ${{ vars.PRODUCT_URL }}
+
+          ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          python monitor.py
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-artifacts-${{ github.run_id }}
+          path: |
+            artifacts/*.png
+            artifacts/failure-report.md
+            artifacts/run-summary.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload last run summary (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-summary-${{ github.run_id }}
+          path: artifacts/run-summary.json
+          retention-days: 3
+          if-no-files-found: ignore
