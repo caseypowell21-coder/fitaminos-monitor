@@ -41,10 +41,10 @@ BASE_URL = "https://fitaminos.com"
 
 # A known, stable product URL. If/when this product is retired, swap it
 # for a more stable one (or read from env var PRODUCT_URL).
-PRODUCT_URL = os.environ.get(
-    "PRODUCT_URL",
-    f"{BASE_URL}/shop/",  # fallback: pick first product on shop page
-)
+# NOTE: use `or` rather than the default arg of os.environ.get(): GitHub
+# Actions expands an unset `vars.PRODUCT_URL` to the empty string, not
+# "unset", so `.get(key, default)` would return "" and break page.goto().
+PRODUCT_URL = os.environ.get("PRODUCT_URL") or f"{BASE_URL}/shop/"
 
 DEFAULT_TIMEOUT_MS = 20_000  # 20s per page action
 NAV_TIMEOUT_MS = 25_000
