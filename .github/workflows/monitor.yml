@@ -29,7 +29,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          # NOTE: pip cache intentionally disabled. We use --no-cache-dir
+          # in the install step (no wheels stored), which makes the
+          # post-step cache-save fail with "cache folder ... doesn't
+          # exist on disk" and turns the whole run red even when the
+          # monitor passes. Removing the `cache: 'pip'` line skips the
+          # post-step entirely. (2026-05-08, v1.0.1)
 
       - name: Install Python dependencies
         run: pip install --no-cache-dir -r requirements.txt
